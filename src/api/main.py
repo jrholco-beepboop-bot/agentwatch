@@ -588,11 +588,12 @@ async def get_analytics_summary(
         conditions.append(Trace.agent_id == agent_id)
     
     # Get trace counts
+    from sqlalchemy import case
     trace_stats = await db.execute(
         select(
             func.count(Trace.id).label("total"),
-            func.sum(func.cast(Trace.status == "success", Integer)).label("success"),
-            func.sum(func.cast(Trace.status == "error", Integer)).label("errors"),
+            func.sum(case((Trace.status == "success", 1), else_=0)).label("success"),
+            func.sum(case((Trace.status == "error", 1), else_=0)).label("errors"),
             func.avg(Trace.duration_ms).label("avg_duration")
         ).where(and_(*conditions))
     )
@@ -644,12 +645,13 @@ async def get_agent_analytics(
     if not since:
         since = datetime.utcnow() - timedelta(days=7)
     
+    from sqlalchemy import case
     result = await db.execute(
         select(
             Agent.id,
             Agent.name,
             func.count(Trace.id).label("trace_count"),
-            func.sum(func.cast(Trace.status == "success", Integer)).label("success_count"),
+            func.sum(case((Trace.status == "success", 1), else_=0)).label("success_count"),
             func.avg(Trace.duration_ms).label("avg_duration")
         )
         .join(Trace, Agent.id == Trace.agent_id)

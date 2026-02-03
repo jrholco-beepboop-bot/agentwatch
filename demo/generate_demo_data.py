@@ -175,7 +175,7 @@ async def create_alert(client: httpx.AsyncClient, agent_ids: list):
 
 async def main():
     """Generate demo data."""
-    print("🚀 AgentWatch Demo Data Generator")
+    print("AgentWatch Demo Data Generator")
     print("=" * 50)
     
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -183,25 +183,25 @@ async def main():
         try:
             response = await client.get(f"{API_URL}/health")
             if response.status_code != 200:
-                print("❌ API not responding. Start it with: python -m src.api.main")
+                print("[ERROR] API not responding. Start it with: python -m src.api.main")
                 return
         except Exception as e:
-            print(f"❌ Cannot connect to API at {API_URL}")
-            print("   Start the API with: python -m src.api.main")
+            print(f"[ERROR] Cannot connect to API at {API_URL}")
+            print("        Start the API with: python -m src.api.main")
             return
         
-        print("✓ API is running")
+        print("[OK] API is running")
         
         # Create agents
-        print("\n📋 Creating agents...")
+        print("\nCreating agents...")
         agent_ids = {}
         for agent in AGENTS:
             agent_id = await create_agent(client, agent)
             agent_ids[agent["name"]] = agent_id
-            print(f"   ✓ {agent['name']}")
+            print(f"   [+] {agent['name']}")
         
         # Generate traces (simulate last 7 days of activity)
-        print("\n📊 Generating traces...")
+        print("\nGenerating traces...")
         total_traces = 0
         
         for hours_ago in range(168, 0, -1):  # Last 7 days, hourly
@@ -215,17 +215,17 @@ async def main():
             if hours_ago % 24 == 0:
                 print(f"   Day -{hours_ago // 24}: {total_traces} traces generated")
         
-        print(f"   ✓ Total: {total_traces} traces")
+        print(f"   [OK] Total: {total_traces} traces")
         
         # Create some alerts
-        print("\n🚨 Creating sample alerts...")
+        print("\nCreating sample alerts...")
         await create_alert(client, list(agent_ids.values()))
-        print("   ✓ Alerts created")
+        print("   [OK] Alerts created")
         
         print("\n" + "=" * 50)
-        print("✅ Demo data generation complete!")
-        print("\n📊 View the dashboard at: http://localhost:8766")
-        print("📚 API docs at: http://localhost:8765/docs")
+        print("[DONE] Demo data generation complete!")
+        print("\nView the dashboard at: http://localhost:8766")
+        print("API docs at: http://localhost:8765/docs")
 
 
 if __name__ == "__main__":
