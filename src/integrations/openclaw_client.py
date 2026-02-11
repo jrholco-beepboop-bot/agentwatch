@@ -1,15 +1,16 @@
 """
-OpenClaw API Client
+OpenClaw Session File Reader
 
-Lightweight wrapper for OpenClaw sessions_list polling.
-Zero LLM costs — pure Python filtering only.
+Lightweight reader for OpenClaw session JSONL files.
+Zero LLM costs — pure filesystem reads + Python filtering.
+Reads session files directly from ~/.openclaw/agents/<agentId>/sessions/*.jsonl
 """
 
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
-import httpx
+from pathlib import Path
 from dataclasses import dataclass
 
 
@@ -17,7 +18,6 @@ from dataclasses import dataclass
 class SessionTelemetry:
     """Extracted telemetry from an OpenClaw session."""
     session_id: str
-    session_key: str
     agent_id: str
     kind: str  # "main", "subagent", "cron", "group"
     label: Optional[str]
@@ -32,23 +32,31 @@ class SessionTelemetry:
 
 class OpenClawClient:
     """
-    Non-blocking, zero-LLM client for OpenClaw monitoring.
-    Calls sessions_list endpoint only — no analysis.
+    Reads OpenClaw session JSONL files directly from filesystem.
+    No API, no CLI — just file reads. Zero overhead.
     """
     
-    def __init__(self, api_url: str = "http://127.0.0.1:18789", timeout_s: int = 5):
-        self.api_url = api_url.rstrip("/")
-        self.timeout = timeout_s
-        self.client = httpx.Client(timeout=timeout_s)
+    def __init__(self, openclaw_home: Optional[str] = None):
+        # Default to ~/.openclaw
+        if openclaw_home:
+            self.openclaw_home = Path(openclaw_home).expanduser()
+        else:
+            self.openclaw_home = Path.home() / ".openclaw"
+        
+        self.sessions_dir = self.openclaw_home / "agents"
+        
+        if not self.sessions_dir.exists():
+            raise OpenClawError(f"OpenClaw directory not found: {self.sessions_dir}")
     
     def get_sessions(self, 
                      kinds: Optional[List[str]] = None,
                      limit: int = 50,
                      active_minutes: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Fetch raw sessions from OpenClaw via HTTP API or CLI fallback.
+        Read active sessions from OpenClaw JSONL files on disk.
         
-        Tries gateway HTTP API first, falls back to CLI if needed.
+        Scans ~/.openclaw/agents/*/sessions/*.jsonl for active sessions.
+        No API, no CLI — pure filesystem reads.
         
         Args:
             kinds: Filter by session kind (main, subagent, cron, group)
@@ -56,86 +64,134 @@ class OpenClawClient:
             active_minutes: Only sessions active in last N minutes
         
         Returns:
-            List of session objects
+            List of session dicts with metadata
         
         Raises:
-            OpenClawError: If both API and CLI fail
+            OpenClawError: If sessions directory not found
         """
-        import subprocess
+        sessions = []
+        cutoff_time = None
         
-        # Try HTTP API first
+        if active_minutes:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=active_minutes)
+        
+        # Scan all agent directories
         try:
-            params = {"limit": limit}
-            if kinds:
-                params["kinds"] = ",".join(kinds)
-            if active_minutes:
-                params["activeMinutes"] = active_minutes
-            
-            resp = self.client.get(f"{self.api_url}/api/sessions", params=params, timeout=5)
-            
-            if resp.status_code == 200:
-                try:
-                    # Check content type before parsing
-                    content_type = resp.headers.get("content-type", "").lower()
-                    if "application/json" in content_type or resp.text.strip().startswith(("{", "[")):
-                        data = resp.json()
-                        if isinstance(data, list):
-                            return data
-                        elif isinstance(data, dict) and "sessions" in data:
-                            return data["sessions"]
-                        else:
-                            return data if isinstance(data, list) else []
-                except (json.JSONDecodeError, ValueError):
-                    # Response isn't JSON, might be HTML or text
-                    pass
+            for agent_dir in self.sessions_dir.iterdir():
+                if not agent_dir.is_dir():
+                    continue
+                
+                agent_id = agent_dir.name
+                sessions_subdir = agent_dir / "sessions"
+                
+                if not sessions_subdir.exists():
+                    continue
+                
+                # Read all JSONL files in this agent's sessions directory
+                for session_file in sorted(sessions_subdir.glob("*.jsonl"), reverse=True):
+                    if len(sessions) >= limit:
+                        break
+                    
+                    session_data = self._parse_session_file(
+                        session_file, agent_id, cutoff_time
+                    )
+                    
+                    if session_data:
+                        # Filter by kind if specified
+                        if kinds and session_data.get("kind") not in kinds:
+                            continue
+                        
+                        sessions.append(session_data)
         except Exception as e:
-            # HTTP failed, will try CLI
-            pass
+            raise OpenClawError(f"Failed to scan sessions: {e}")
         
-        # Fallback to CLI
+        return sessions[:limit]
+    
+    def _parse_session_file(self, 
+                           filepath: Path, 
+                           agent_id: str,
+                           cutoff_time: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        """
+        Parse a single JSONL session file.
+        Extract metadata: agent ID, model, token counts, timestamps.
+        """
         try:
-            cmd = ["openclaw", "sessions", "list", f"--limit={limit}"]
-            if kinds:
-                cmd.append(f"--kinds={','.join(kinds)}")
-            if active_minutes:
-                cmd.append(f"--activeMinutes={active_minutes}")
+            # Read last few lines (most recent state)
+            lines = []
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                # Read entire file to get latest state
+                for line in f:
+                    if line.strip():
+                        lines.append(line)
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            if not lines:
+                return None
             
-            if result.returncode != 0:
-                raise OpenClawError(f"openclaw command failed: {result.stderr}")
+            # Try to find metadata in recent messages
+            total_tokens = 0
+            context_tokens = 0
+            model = "unknown"
+            last_timestamp = None
+            kind = "unknown"
+            channel = "unknown"
             
-            # Parse JSON output
-            data = json.loads(result.stdout)
+            # Scan backwards through file for token counts and metadata
+            for line in reversed(lines[-10:]):  # Check last 10 lines
+                try:
+                    obj = json.loads(line)
+                    
+                    # Look for token counts
+                    if "totalTokens" in obj:
+                        total_tokens = obj.get("totalTokens", 0)
+                    if "contextTokens" in obj:
+                        context_tokens = obj.get("contextTokens", 0)
+                    if "model" in obj:
+                        model = obj.get("model", "unknown")
+                    if "kind" in obj:
+                        kind = obj.get("kind", "unknown")
+                    if "channel" in obj:
+                        channel = obj.get("channel", "unknown")
+                    if "timestamp" in obj:
+                        last_timestamp = obj.get("timestamp")
+                    
+                    # If we found key fields, we can stop
+                    if total_tokens > 0 and model != "unknown":
+                        break
+                except json.JSONDecodeError:
+                    pass
             
-            # Response is either a list directly or wrapped in a dict
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict) and "sessions" in data:
-                return data["sessions"]
-            else:
-                return data if isinstance(data, list) else []
+            # Get file modification time as fallback
+            mtime = filepath.stat().st_mtime * 1000  # Convert to ms
+            
+            # Check if session is recent enough
+            if cutoff_time and last_timestamp:
+                try:
+                    ts = datetime.fromisoformat(last_timestamp)
+                    if ts < cutoff_time:
+                        return None
+                except:
+                    pass
+            
+            return {
+                "sessionId": filepath.stem,
+                "agentId": agent_id,
+                "kind": kind,
+                "label": None,
+                "totalTokens": total_tokens,
+                "contextTokens": context_tokens,
+                "model": model,
+                "channel": channel,
+                "updatedAt": int(mtime),
+                "lastMessageTimestamp": last_timestamp,
+            }
         
-        except json.JSONDecodeError as e:
-            raise OpenClawError(f"Invalid response JSON: {e}")
-        except subprocess.TimeoutExpired:
-            raise OpenClawError("OpenClaw command timed out")
-        except FileNotFoundError:
-            raise OpenClawError("openclaw CLI not found in PATH")
+        except Exception as e:
+            return None
     
     def extract_telemetry(self, session: Dict[str, Any]) -> SessionTelemetry:
-        """
-        Map raw session to telemetry.
-        Pure Python — no LLM calls.
-        """
+        """Map raw session to telemetry. Pure Python — no LLM calls."""
         return SessionTelemetry(
             session_id=session.get("sessionId", ""),
-            session_key=session.get("key", ""),
             agent_id=session.get("agentId", "unknown"),
             kind=session.get("kind", "unknown"),
             label=session.get("label"),
@@ -144,23 +200,19 @@ class OpenClawClient:
             context_tokens=session.get("contextTokens", 0),
             updated_at_ms=session.get("updatedAt", 0),
             model=session.get("model", "unknown"),
-            last_message_timestamp=session.get("messages", [{}])[-1].get("timestamp"),
+            last_message_timestamp=session.get("lastMessageTimestamp"),
             channel=session.get("channel", "unknown"),
         )
     
     @staticmethod
     def _infer_status(session: Dict[str, Any]) -> str:
         """Infer status from session fields (code-only, no LLM)."""
-        if session.get("abortedLastRun"):
-            return "error"
-        messages = session.get("messages", [])
-        if messages and messages[-1].get("role") == "assistant":
-            return "completed"
+        # For file-based reader, we don't have abort status, assume active
         return "active"
     
     def close(self):
-        """Clean up HTTP client."""
-        self.client.close()
+        """No-op for file-based reader."""
+        pass
 
 
 class OpenClawError(Exception):
