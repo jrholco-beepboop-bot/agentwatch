@@ -46,10 +46,9 @@ class OpenClawClient:
                      limit: int = 50,
                      active_minutes: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Fetch raw sessions from OpenClaw via the OpenClaw CLI.
+        Fetch raw sessions from OpenClaw via HTTP API or CLI fallback.
         
-        Since the gateway HTTP API may not be reliable, we use the CLI directly.
-        This is faster and more reliable for local integration.
+        Tries gateway HTTP API first, falls back to CLI if needed.
         
         Args:
             kinds: Filter by session kind (main, subagent, cron, group)
@@ -57,13 +56,39 @@ class OpenClawClient:
             active_minutes: Only sessions active in last N minutes
         
         Returns:
-            List of session objects from sessions_list command
+            List of session objects
         
         Raises:
-            OpenClawError: If command fails
+            OpenClawError: If both API and CLI fail
         """
         import subprocess
         
+        # Try HTTP API first
+        try:
+            params = {"limit": limit}
+            if kinds:
+                params["kinds"] = ",".join(kinds)
+            if active_minutes:
+                params["activeMinutes"] = active_minutes
+            
+            resp = self.client.get(f"{self.api_url}/api/sessions", params=params, timeout=5)
+            
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        return data
+                    elif isinstance(data, dict) and "sessions" in data:
+                        return data["sessions"]
+                    else:
+                        return data if isinstance(data, list) else []
+                except (json.JSONDecodeError, ValueError):
+                    # Response isn't JSON, might be HTML or text
+                    pass
+        except Exception:
+            pass  # Fall through to CLI
+        
+        # Fallback to CLI
         try:
             cmd = ["openclaw", "sessions", "list", f"--limit={limit}"]
             if kinds:
