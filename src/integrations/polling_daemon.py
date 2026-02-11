@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import httpx
 from .openclaw_client import OpenClawClient, OpenClawError
-from .data_mapper import DataMapper
+from .data_mapper import DataMapper, TelemetryEvent
 
 
 logger = logging.getLogger(__name__)
@@ -108,11 +108,18 @@ class PollingDaemon:
         start_time = time.time()
         
         # Fetch sessions (kinds: main, subagent, group — skip cron)
-        sessions = self.openclaw.get_sessions(
-            kinds=["main", "subagent", "group"],
-            limit=self.batch_size,
-            active_minutes=30  # Only active in last 30 min
-        )
+        try:
+            sessions = self.openclaw.get_sessions(
+                kinds=["main", "subagent", "group"],
+                limit=self.batch_size,
+                active_minutes=30  # Only active in last 30 min
+            )
+        except OpenClawError as e:
+            # Log but don't fail — might be CLI not found, HTTP may fail
+            logger.warning(f"Could not fetch sessions: {e}")
+            elapsed = time.time() - start_time
+            logger.debug(f"Poll #{iteration}: Failed to fetch sessions ({elapsed:.2f}s)")
+            return
         
         # Map to telemetry events
         events = []

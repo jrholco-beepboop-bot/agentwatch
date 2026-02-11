@@ -75,18 +75,22 @@ class OpenClawClient:
             
             if resp.status_code == 200:
                 try:
-                    data = resp.json()
-                    if isinstance(data, list):
-                        return data
-                    elif isinstance(data, dict) and "sessions" in data:
-                        return data["sessions"]
-                    else:
-                        return data if isinstance(data, list) else []
+                    # Check content type before parsing
+                    content_type = resp.headers.get("content-type", "").lower()
+                    if "application/json" in content_type or resp.text.strip().startswith(("{", "[")):
+                        data = resp.json()
+                        if isinstance(data, list):
+                            return data
+                        elif isinstance(data, dict) and "sessions" in data:
+                            return data["sessions"]
+                        else:
+                            return data if isinstance(data, list) else []
                 except (json.JSONDecodeError, ValueError):
                     # Response isn't JSON, might be HTML or text
                     pass
-        except Exception:
-            pass  # Fall through to CLI
+        except Exception as e:
+            # HTTP failed, will try CLI
+            pass
         
         # Fallback to CLI
         try:
