@@ -29,26 +29,23 @@ class PollingDaemon:
     """
     
     def __init__(self,
-                 openclaw_url: str = "http://127.0.0.1:18789",
                  agentwatch_url: str = "http://localhost:8765",
                  poll_interval_s: int = 30,
                  batch_size: int = 50,
                  max_errors: int = 10):
         """
         Args:
-            openclaw_url: OpenClaw gateway URL
             agentwatch_url: AgentWatch API URL
             poll_interval_s: Seconds between polls
             batch_size: Max sessions to fetch per poll
             max_errors: Stop after N consecutive errors
         """
-        self.openclaw_url = openclaw_url
         self.agentwatch_url = agentwatch_url.rstrip("/")
         self.poll_interval_s = poll_interval_s
         self.batch_size = batch_size
         self.max_errors = max_errors
         
-        self.openclaw = OpenClawClient(api_url=openclaw_url)
+        self.openclaw = OpenClawClient()  # Uses ~/.openclaw by default
         self.mapper = DataMapper()
         self.client = httpx.Client(timeout=10)
         
@@ -66,7 +63,7 @@ class PollingDaemon:
         """
         logger.info(f"Starting OpenClaw→AgentWatch polling daemon")
         logger.info(f"  Poll interval: {self.poll_interval_s}s")
-        logger.info(f"  OpenClaw URL: {self.openclaw_url}")
+        logger.info(f"  Reading sessions from: ~/.openclaw/agents/*/sessions/")
         logger.info(f"  AgentWatch URL: {self.agentwatch_url}")
         
         iteration = 0

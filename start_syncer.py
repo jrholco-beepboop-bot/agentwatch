@@ -16,7 +16,6 @@ logging.basicConfig(
 
 if __name__ == "__main__":
     daemon = PollingDaemon(
-        openclaw_url="http://127.0.0.1:18789",
         agentwatch_url="http://localhost:8765",
         poll_interval_s=30,
     )
